@@ -1,0 +1,338 @@
+{
+    "name": "Invoice Processing Pipeline",
+    "nodes": [
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "process-invoice",
+                "options": {
+                    "rawBody": false
+                },
+                "responseMode": "lastNode"
+            },
+            "id": "webhook-trigger",
+            "name": "Webhook",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "position": [
+                0,
+                300
+            ],
+            "webhookId": "invoice-upload"
+        },
+        {
+            "parameters": {
+                "operation": "text",
+                "options": {}
+            },
+            "id": "extract-pdf-text",
+            "name": "Extract PDF Text",
+            "type": "n8n-nodes-base.extractFromFile",
+            "typeVersion": 1,
+            "position": [
+                240,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsonSchemaExample": "{\n  \"vendor_name\": \"Acme Cloud Services Ltd.\",\n  \"invoice_number\": \"INV-2026-0042\",\n  \"issue_date\": \"2026-01-15\",\n  \"net_amount\": 450.00,\n  \"tax_amount\": 90.00,\n  \"total_gross\": 540.00,\n  \"category_name\": \"Software & SaaS\"\n}"
+            },
+            "id": "structured-output-parser",
+            "name": "Structured Output Parser",
+            "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+            "typeVersion": 1.2,
+            "position": [
+                620,
+                500
+            ]
+        },
+        {
+            "parameters": {
+                "options": {
+                    "systemMessage": "PASTE_PROMPT_HERE"
+                },
+                "promptType": "define",
+                "text": "=Extract the invoice data from the following text:\n\n{{ $('Extract PDF Text').item.json.text }}\n\nThe company_id for this tenant is: {{ $('Webhook').item.json.body.company_id }}"
+            },
+            "id": "ai-agent",
+            "name": "AI Agent",
+            "type": "@n8n/n8n-nodes-langchain.agent",
+            "typeVersion": 1.7,
+            "position": [
+                480,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "combinator": "or"
+                    },
+                    "conditions": [
+                        {
+                            "id": "condition-vendor-null",
+                            "leftValue": "={{ $json.output.vendor_name }}",
+                            "rightValue": "",
+                            "operator": {
+                                "type": "string",
+                                "operation": "empty",
+                                "singleValue": true
+                            }
+                        },
+                        {
+                            "id": "condition-total-null",
+                            "leftValue": "={{ $json.output.total_gross }}",
+                            "rightValue": "",
+                            "operator": {
+                                "type": "number",
+                                "operation": "empty",
+                                "singleValue": true
+                            }
+                        }
+                    ]
+                }
+            },
+            "id": "validation-check",
+            "name": "Validation Check",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2.2,
+            "position": [
+                740,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO public.vendors (company_id, name)\nVALUES ($1::uuid, $2)\nON CONFLICT (company_id, name)\nDO UPDATE SET name = EXCLUDED.name\nRETURNING id;",
+                "options": {
+                    "queryParameters": "={{ [$('Webhook').item.json.body.company_id, $('AI Agent').item.json.output.vendor_name] }}"
+                }
+            },
+            "id": "upsert-vendor",
+            "name": "Upsert Vendor",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                1000,
+                200
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+                    "name": "Supabase Postgres"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "SELECT id FROM public.expense_categories\nWHERE name = $1\nLIMIT 1;",
+                "options": {
+                    "queryParameters": "={{ [$('AI Agent').item.json.output.category_name] }}"
+                }
+            },
+            "id": "lookup-category",
+            "name": "Lookup Category",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                1260,
+                200
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+                    "name": "Supabase Postgres"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO public.invoices (\n  company_id,\n  vendor_id,\n  category_id,\n  invoice_number,\n  issue_date,\n  net_amount,\n  tax_amount,\n  total_gross,\n  pdf_url,\n  status,\n  raw_extracted_data\n) VALUES (\n  $1::uuid,\n  $2::uuid,\n  $3::uuid,\n  $4,\n  $5::date,\n  $6::numeric,\n  $7::numeric,\n  $8::numeric,\n  NULL,\n  'completed',\n  $9::jsonb\n)\nON CONFLICT (company_id, invoice_number)\nDO UPDATE SET\n  vendor_id = EXCLUDED.vendor_id,\n  category_id = EXCLUDED.category_id,\n  issue_date = EXCLUDED.issue_date,\n  net_amount = EXCLUDED.net_amount,\n  tax_amount = EXCLUDED.tax_amount,\n  total_gross = EXCLUDED.total_gross,\n  status = EXCLUDED.status,\n  raw_extracted_data = EXCLUDED.raw_extracted_data,\n  updated_at = now()\nRETURNING id, invoice_number, status;",
+                "options": {
+                    "queryParameters": "={{ [$('Webhook').item.json.body.company_id, $('Upsert Vendor').item.json[0].id, $('Lookup Category').item.json[0]?.id ?? null, $('AI Agent').item.json.output.invoice_number, $('AI Agent').item.json.output.issue_date, $('AI Agent').item.json.output.net_amount, $('AI Agent').item.json.output.tax_amount, $('AI Agent').item.json.output.total_gross, JSON.stringify($('AI Agent').item.json.output)] }}"
+                }
+            },
+            "id": "insert-invoice",
+            "name": "Insert Invoice",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                1520,
+                200
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+                    "name": "Supabase Postgres"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "values": {
+                    "string": [
+                        {
+                            "name": "error",
+                            "value": "Extraction failed: vendor_name or total_gross is null/empty."
+                        },
+                        {
+                            "name": "company_id",
+                            "value": "={{ $('Webhook').item.json.body.company_id }}"
+                        },
+                        {
+                            "name": "raw_output",
+                            "value": "={{ JSON.stringify($('AI Agent').item.json.output) }}"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "log-error",
+            "name": "Log Extraction Error",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3.4,
+            "position": [
+                1000,
+                460
+            ]
+        },
+        {
+            "parameters": {
+                "values": {
+                    "string": [
+                        {
+                            "name": "status",
+                            "value": "success"
+                        },
+                        {
+                            "name": "invoice_id",
+                            "value": "={{ $json[0].id }}"
+                        },
+                        {
+                            "name": "invoice_number",
+                            "value": "={{ $json[0].invoice_number }}"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "success-response",
+            "name": "Success Response",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3.4,
+            "position": [
+                1780,
+                200
+            ]
+        }
+    ],
+    "connections": {
+        "Webhook": {
+            "main": [
+                [
+                    {
+                        "node": "Extract PDF Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract PDF Text": {
+            "main": [
+                [
+                    {
+                        "node": "AI Agent",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Structured Output Parser": {
+            "ai_outputParser": [
+                [
+                    {
+                        "node": "AI Agent",
+                        "type": "ai_outputParser",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "AI Agent": {
+            "main": [
+                [
+                    {
+                        "node": "Validation Check",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Validation Check": {
+            "main": [
+                [
+                    {
+                        "node": "Log Extraction Error",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Upsert Vendor",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Upsert Vendor": {
+            "main": [
+                [
+                    {
+                        "node": "Lookup Category",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Lookup Category": {
+            "main": [
+                [
+                    {
+                        "node": "Insert Invoice",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Insert Invoice": {
+            "main": [
+                [
+                    {
+                        "node": "Success Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "staticData": null,
+    "tags": [],
+    "triggerCount": 1,
+    "pinData": {}
+}
