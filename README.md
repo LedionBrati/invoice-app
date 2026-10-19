@@ -1,79 +1,69 @@
-# Invoice Intelligence Dashboard
+# Invoice App
 
-A mini SaaS tool where you upload invoices as PDFs and the AI extracts, analyzes, and organizes everything into a clean dashboard — with vendor tracking, spending categories, and charts. Built to look and feel like a real product.
+Upload a PDF invoice, an AI agent reads it, and a dashboard shows where the money goes.
 
-## What it does
+## Why I built it
 
-- Upload invoices as PDFs through a drag-and-drop interface
-- AI automatically extracts vendor, amount, date, and category from each invoice
-- Dashboard displays spending trends, vendor breakdowns, and category charts
-- Multi-company support with authentication
-- Export reports as CSV
+This was my first real project, in April 2026.
 
-## Tech Stack
+I wanted to solve a real problem. The honest part: I hadn't been close to anyone's real problems yet. So I picked one that sounded real. Small companies get invoices as PDFs, someone types the numbers into a spreadsheet by hand, and nobody sees the spending clearly.
 
-| Layer | Technology |
-|---|---|
-| Frontend | Next.js 16, React 19, TypeScript, Tailwind CSS |
-| UI Components | shadcn/ui, Radix UI, Recharts |
-| Auth & Database | Supabase (Postgres + Row Level Security) |
-| Automation | n8n workflow (PDF → AI extraction → Database) |
-| State Management | Zustand |
+I built the whole thing end to end to learn how the pieces of a real product fit together.
 
-## Architecture
+## How it works
 
 ```
-PDF Upload (Frontend)
+Upload a PDF (Next.js page)
       ↓
-n8n Webhook
+n8n webhook
       ↓
-Extract PDF Text → AI Agent (LLM)
+Extract the text from the PDF
       ↓
-Structured Output (vendor, amount, date, category)
+AI agent pulls out: vendor, invoice number, date, net, tax, total, category
       ↓
-Supabase Postgres
+Check: no vendor or no total? stop and return an error
       ↓
-Dashboard (Next.js)
+Save to Supabase (create the vendor if it's new, match the category)
+      ↓
+Dashboard: spending charts, vendors, categories, CSV export
 ```
 
-## Project Structure
+The AI step uses a structured output parser, so the model has to return clean JSON in a fixed shape. The prompt (`n8n/prompts/invoice_extraction_prompt.md`) tells it to:
 
-```
-├── frontend/          # Next.js app
-│   ├── src/
-│   │   ├── app/       # Pages (dashboard, invoices, vendors, reports, upload)
-│   │   ├── components/
-│   │   ├── hooks/
-│   │   ├── stores/
-│   │   └── types/
-├── n8n/
-│   ├── workflows/     # n8n pipeline JSON (import into your n8n instance)
-│   └── prompts/       # AI extraction prompt
-└── supabase/
-    └── migrations/    # Database schema & RLS policies
-```
+- take the vendor, not the company being billed
+- write dates as `YYYY-MM-DD`
+- strip currency symbols (`€1.200,50` becomes `1200.50`)
+- check that net + tax = total
+- pick one of 10 fixed categories, and use `Miscellaneous` when unsure instead of guessing
 
-## Getting Started
+## Key decisions
 
-### 1. Supabase
+- **n8n for the AI pipeline.** I could see every step and test each node on its own, instead of writing a backend from scratch.
+- **Supabase with row level security.** Each user gets their own company on signup (a database trigger does it), and the database itself only lets them see their own invoices.
+- **No duplicate invoices.** Invoice numbers are unique per company. Uploading the same invoice twice updates it instead of adding it again.
+- **Fixed categories.** Free text categories from an LLM drift ("Software", "SaaS", "Software & SaaS"). A fixed list keeps the charts clean.
 
-- Create a project at [supabase.com](https://supabase.com)
-- Run the migrations in `supabase/migrations/` in order
+## What I learned
 
-### 2. n8n
+- **Start from a real user.** I built a full product for a problem I'd never actually seen. It works, but nobody asked for it. Now I try to start from a problem I've actually seen, like hosts in Santorini answering the same guest messages all day ([aurora-ai](https://github.com/LedionBrati/aurora-ai)).
+- **The model is the easy part.** Most of the work was everything around it: auth, the database, permissions, handling a bad PDF, showing the data.
+- **Don't trust what the AI gives you.** A bad PDF can come back with no vendor or no total. So the workflow checks that before anything touches the database.
+- **Security is easy to skip when nobody is using it.** See the known gaps below.
 
-- Import `n8n/workflows/invoice_processing.json` into your n8n instance
-- Add your Supabase Postgres credentials
-- Copy the webhook URL
+## Run it
 
-### 3. Frontend
+You need a Supabase project, an n8n instance, and an LLM API key.
+
+1. **Supabase:** run the files in `supabase/migrations/` in order.
+2. **n8n:** import `n8n/workflows/invoice_processing.json`. Connect a chat model to the AI Agent node, paste the prompt from `n8n/prompts/invoice_extraction_prompt.md` as its system message, add your Supabase Postgres credentials, and copy the webhook URL.
+3. **Frontend:**
 
 ```bash
 cd frontend
 npm install
 ```
 
-Create a `.env.local` file:
+Create `frontend/.env.local`:
 
 ```env
 NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
@@ -85,6 +75,13 @@ NEXT_PUBLIC_N8N_WEBHOOK_URL=your_n8n_webhook_url
 npm run dev
 ```
 
----
+Stack: Next.js 16, React 19, TypeScript, Tailwind, shadcn/ui, Recharts, Zustand, Supabase, n8n.
 
-Built with Next.js, Supabase, and n8n.
+## Status
+
+Finished as a learning project. Not deployed, not used by a real company.
+
+Known gaps I'd fix before anyone used it:
+
+- The n8n webhook has no auth and trusts the `company_id` sent with the upload. Anyone with the URL could add invoices to any company.
+- The PDF itself isn't stored, only the extracted data.
